@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Nov  5 09:35:32 2024
+
+@author: Sonny Genovese & Thomas-Victor Coll
+"""
+
+import micropip
+await micropip.install("scipy")
+
+
+import streamlit as st
+import numpy as np
+from scipy.stats import norm
+from scipy.optimize import brentq
+import matplotlib.pyplot as plt
+
+
+# Black & Scholes formula definition (European_Options)
+def call_pricer(stock_price, strike_price, r_free, maturity, sigma, dividend_yield):
+    adjusted_stock_price = stock_price * np.exp(-dividend_yield * maturity)
+    d1 = (np.log(adjusted_stock_price / strike_price) + (r_free + (sigma**2) / 2) * maturity) / (sigma * np.sqrt(maturity))
+    d2 = d1 - sigma * np.sqrt(maturity)
+    N1 = norm.cdf(d1)
+    N2 = norm.cdf(d2)
+    price = adjusted_stock_price * N1 - strike_price * np.exp(-r_free * maturity) * N2
+    return price
+
+def put_pricer(stock_price, strike_price, r_free, maturity, sigma, dividend_yield):
+    adjusted_stock_price = stock_price * np.exp(-dividend_yield * maturity)
+    d1 = (np.log(adjusted_stock_price / strike_price) + (r_free + (sigma**2) / 2) * maturity) / (sigma * np.sqrt(maturity))
+    d2 = d1 - sigma * np.sqrt(maturity)
+    N1 = norm.cdf(d1)
+    N2 = norm.cdf(d2)
+    price = strike_price * np.exp(-r_free * maturity) * (1 - N2) - adjusted_stock_price * (1 - N1)
+    return price
+
+steps = 200
+
+# Binomial Tree formula definition (American_Options)
+def american_call_pricer(stock_price, strike_price, r_free, maturity, sigma, steps, dividend_yield):
+    dt = maturity/steps
+    upper = np.exp(sigma*np.sqrt(dt))
+    down = 1/upper
+    probability = (np.exp((r_free - dividend_yield) * dt) - down) / (upper - down)
+
+    asset_prices = np.zeros((steps + 1, steps + 1))
+    for i in range(steps + 1):
+        for j in range(i + 1):
+            asset_prices[j, i] = stock_price * (upper ** (i - j)) * (down ** j)
+    option_values = np.maximum(asset_prices[:, steps] - strike_price, 0)
+    for step in range(steps - 1, -1, -1):
+        for i in range(step + 1):
+            hold_value = np.exp(-r_free * dt) * (probability * option_values[i] + (1 - probability) * option_values[i + 1])
+            exercise_value = max(asset_prices[i, step] - strike_price, 0)
+            option_values[i] = max(hold_value, exercise_value)
+    return option_values[0]
+
+def american_put_pricer(stock_price, strike_price, r_free, maturity, sigma, steps, dividend_yield):
+    dt = maturity/steps
+    upper = np.exp(sigma*np.sqrt(dt))
+    down = 1/upper
+    probability = (np.exp((r_free - dividend_yield) * dt) - down) / (upper - down)
+
+    asset_prices = np.zeros((steps + 1, steps + 1))
+    for i in range(steps + 1):
+        for j in range(i + 1):
+            asset_prices[j, i] = stock_price * (upper ** (i - j)) * (down ** j)
+    option_values = np.maximum(strike_price - asset_prices[:, steps], 0)
+    for step in range(steps - 1, -1, -1):
+        for i in range(step + 1):
+            hold_value = np.exp(-r_free * dt) * (probability * option_values[i] + (1 - probability) * option_values[i + 1])
+            exercise_value = asset_prices[i] - strike_price
+            exercise_value = max(strike_price - asset_prices[i, step], 0)
+            option_values[i] = max(hold_value, exercise_value)
+    return option_values[0]
+
+# Asian option - Monte-Carlo Simulation 
+def asian_option_pricer(stock_price, r_free, sigma, maturity, num_step=50, num_simulation=10000):
+    np.random.seed(42)
+    dt = maturity / num_step
+
+    assert num_step > 1, "Le nombre de pas de temps doit être supérieur à 1"
+    assert num_simulation > 100, "Le nombre de simulation doit être suffisamment grand"
+
+    S = np.zeros((num_simulation, num_step + 1))
+    S[:, 0] = stock_price
+
+    for t in range(1, num_step + 1):
+        z = np.random.standard_normal(num_simulation)
+        S[:, t] = S[:, t-1]* np.exp((r_free - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * z)
+
+    # Calcul de la moyenne arithmétique des prix simulés
+    S_avg = np.mean(S[:, 1:], axis=1) # On ignore S[:,0] car c'est le prix initial
+    return S_avg, S # Retourne la moyenne arithmétique du sous-jacent
+
+def asian_call_pricer (strike_price, S_avg, r_free, maturity, S):
+    payoff = np.maximum(S_avg - strike_price, 0)
+    asian_call_price = np.exp(-r_free * maturity) * np.mean(payoff)
+
+    fig, ax = plt.subplots()
+    ax.plot(S[:15].T)  # Afficher 15 trajectoires aléatoires
+    ax.set_title("Simulations de prix pour l'option asiatique")
+    ax.set_xlabel("Temps (étapes de la simulation)")
+    ax.set_ylabel("Prix du sous-jacent")
+    st.pyplot(fig)
+
+    return asian_call_price
+
+def asian_put_pricer(strike_price, S_avg, r_free, maturity, S):
+    payoff = np.maximum(strike_price - S_avg , 0)
+    asian_put_price = np.exp(-r_free * maturity) * np.mean(payoff)
+
+    fig, ax = plt.subplots()
+    ax.plot(S[:15].T)  # Afficher 15 trajectoires aléatoires
+    ax.set_title("Simulations de prix pour l'option asiatique")
+    ax.set_xlabel("Temps (étapes de la simulation)")
+    ax.set_ylabel("Prix du sous-jacent")
+    st.pyplot(fig)
+
+    return asian_put_price
+
+#Implied Vol 
+def implied_volatility(market_price, stock_price, strike_price, r_free, maturity, dividend_yield, option_type, option_style, steps=None):
+    def objective_function(sigma):
+        if option_style == "European option":
+            if option_type == "CALL": 
+                return call_pricer(stock_price, strike_price, r_free, maturity, sigma, dividend_yield) - market_price
+            else:
+                return put_pricer(stock_price, strike_price, r_free, maturity, sigma, dividend_yield) - market_price
+        else:
+            if steps is None:
+                raise ValueError("Le nombre de pas (steps) est requis pour une option Américaine.")
+            if steps < 1:
+                raise ValueError("Le nombre de pas (steps) doit être supérieur à 0 pour les options Américaines.")
+            if option_type == "CALL":
+                return american_call_pricer(stock_price, strike_price, r_free, maturity, sigma, steps, dividend_yield) - market_price
+            else:
+                return american_put_pricer(stock_price, strike_price, r_free, maturity, sigma, steps, dividend_yield) - market_price
+
+    try:
+        return brentq(objective_function, 0.01, 3.0)  # Recherche de σ entre 1% et 300%
+    except ValueError:
+        return None  # Impossible de trouver une solution
+
+
+# Greeks 
+def calculate_Delta (stock_price, strike_price, r_free, maturity, sigma, option_type):
+    d1 = (np.log(stock_price / strike_price) + (r_free + (sigma**2) / 2) * maturity) / (sigma * np.sqrt(maturity))
+    if option_type == "CALL" : 
+        return norm.cdf(d1)
+    else : 
+        return norm.cdf(d1)-1
+
+def calculate_Gamma(stock_price, strike_price, r_free, maturity, sigma):
+    d1 = (np.log(stock_price / strike_price) + (r_free+ (sigma**2) / 2) * maturity) / (sigma * np.sqrt(maturity))
+    gamma = norm.pdf(d1) / (stock_price * sigma * np.sqrt(maturity))
+    return gamma
+
+def calculate_Vega(stock_price, strike_price, r_free, maturity, sigma):
+    d1 = (np.log(stock_price/ strike_price) + (r_free + (sigma**2) / 2) * maturity) / (sigma * np.sqrt(maturity))
+    vega = stock_price * norm.pdf(d1) * np.sqrt(maturity)
+    return vega
+
+def calculate_Theta(stock_price, strike_price, r_free, maturity, sigma):
+    d1 = (np.log(stock_price / strike_price) + (r_free + (sigma**2) / 2) * maturity) / (sigma * np.sqrt(maturity))
+    d2 = d1 - sigma * np.sqrt(maturity)
+    if option_type == "CALL" :
+        return -(stock_price * norm.pdf(d1) * sigma) / (2 * np.sqrt(maturity)) - r_free * strike_price * np.exp(-r_free * maturity) * norm.cdf(d2)
+    else:
+        return -(stock_price * norm.pdf(d1) * sigma) / (2 * np.sqrt(maturity)) + r_free * strike_price * np.exp(-r_free * maturity) * norm.cdf(-d2)
+
+def calculate_Rho(stock_price, strike_price, r_free, maturity, sigma, option_type):
+    d1 = (np.log(stock_price / strike_price) + (r_free + (sigma**2) / 2) * maturity) / (sigma * np.sqrt(maturity))
+    d2 = d1 - sigma * np.sqrt(maturity)
+    if option_type == "CALL" :
+        return strike_price * maturity * np.exp(-r_free * maturity) * norm.cdf(d2)
+    else:
+        return -strike_price * maturity * np.exp(-r_free * maturity) * norm.cdf(-d2)
+
+# UI Streamlit
+st.title("Option Pricer")
+
+option = ["European option","American option", "Asian option"]
+option_style = st.selectbox("What would you like to price ?", option)
+
+Options = ["CALL","PUT"]
+option_type = st.selectbox("What would you like to price ?", Options)
+
+stock_price = st.number_input("Stock price (S):", min_value=0.0, value=100.0)
+strike_price = st.number_input("Strike price (K):", min_value=0.0, value=115.0)
+r_free = st.number_input("Risk-free rate (r):", min_value=0.0, value=0.05)
+maturity = st.number_input("Time to maturity (T):", min_value=0.01, value=1.0)
+sigma = st.number_input("Volatility (σ):", min_value=0.01, value=0.2)
+dividend_yield = st.number_input("Dividend_yield :", min_value=0.0, value=0.02)
+
+
+if option_style == "European option":
+    if option_type == "CALL":
+        price = call_pricer(stock_price, strike_price, r_free, maturity, sigma, dividend_yield)
+    else :
+        price = put_pricer(stock_price, strike_price, r_free, maturity, sigma, dividend_yield)
+elif option_style == "American option":
+    if option_type == "CALL":
+        price = american_call_pricer(stock_price, strike_price, r_free, maturity, sigma, steps, dividend_yield)
+    else : 
+        price = american_put_pricer(stock_price, strike_price, r_free, maturity, sigma, steps, dividend_yield)
+else:
+    S_avg, S = asian_option_pricer(stock_price, r_free, sigma, maturity)
+    if option_type =="CALL":
+        price = asian_call_pricer (strike_price, S_avg, r_free, maturity, S)
+    else :
+        price = asian_put_pricer(strike_price, S_avg, r_free, maturity, S)
+st.write(f"The {option_type} option price is: {price:.2f}€")
+
+if option_type == "CALL" : 
+    BEP = strike_price + price
+else :
+    BEP = strike_price - price
+st.write(f"the break even point is: {BEP: .2f}€")
+
+Greeks_Delta = st.checkbox("DELTA Δ")
+if Greeks_Delta :
+    result_Delta = calculate_Delta (stock_price, strike_price, r_free, maturity, sigma, option_type)
+    st.write(f"Delta = {result_Delta:.4f}")
+    stock_prices = np.linspace(0 * stock_price, 2* stock_price, 200)
+    deltas = [calculate_Delta(stock_price, strike_price, r_free, maturity, sigma, option_type) for stock_price in stock_prices]
+    fig1, ax1 = plt.subplots(figsize=(8, 5))
+    ax1.plot(stock_prices, deltas, label="Delta", color='blue')
+    ax1.set_xlabel("Stock Price")
+    ax1.set_ylabel("Delta")
+    ax1.legend()
+    ax1.grid()
+    st.pyplot(fig1)
+    
+Greeks_Gamma = st.checkbox("GAMMA γ")
+if Greeks_Gamma : 
+    result_Gamma = calculate_Gamma(stock_price, strike_price, r_free, maturity, sigma)
+    st.write(f"Gamma = {result_Gamma:.4f}")
+    stock_prices = np.linspace(0 * stock_price, 2 * stock_price, 200)
+    gammas = [calculate_Gamma(stock_price, strike_price, r_free, maturity, sigma) for stock_price in stock_prices]
+    fig2, ax2 = plt.subplots(figsize=(8, 5))
+    ax2.plot(stock_prices, gammas, label="Gamma", color='blue')
+    ax2.set_xlabel("Stock Price")
+    ax2.set_ylabel("Gamma")
+    ax2.set_title("Gamma vs. Stock Price")
+    ax2.legend()
+    ax2.grid()
+    st.pyplot(fig2)
+
+Greeks_Vega = st.checkbox("VEGA ν")
+if Greeks_Vega : 
+    result_Vega = calculate_Vega(stock_price, strike_price, r_free, maturity, sigma)
+    st.write(f"Vega = {result_Vega:.4f}")
+    volatilities = np.linspace(0.01, 0.5, 200)
+    vegas = [calculate_Vega(stock_price, strike_price, r_free, maturity, sigma) for sigma in volatilities]
+    fig3, ax3 = plt.subplots(figsize=(8, 5))
+    ax3.plot(stock_prices, vegas, label="Vega", color='blue')
+    ax3.set_xlabel("Stock Price")
+    ax3.set_ylabel("Vega Value")
+    ax3.set_title("Vega vs. Stock Price")
+    ax3.legend()
+    ax3.grid()
+    st.pyplot(fig3)
+
+Greeks_Theta = st.checkbox("THETA θ")
+if Greeks_Theta : 
+    result_Theta = calculate_Theta(stock_price, strike_price, r_free, maturity, sigma)
+    st.write(f"Theta = {result_Theta:.4f}")
+    maturities = np.linspace(0.01, 2, 100)
+    thetas = [calculate_Theta(stock_price, strike_price, r_free, maturity, sigma) for maturity in maturities]
+    fig4, ax4 = plt.subplots(figsize=(8, 5))
+    ax4.plot(stock_prices, thetas, label="Theta", color='blue')
+    ax4.set_xlabel("Maturity (Years)")
+    ax4.set_ylabel("Theta")
+    ax4.set_title("Theta vs. Maturity")
+    ax4.legend()
+    ax4.grid()
+    st.pyplot(fig4)
+
+Greeks_Rho = st.checkbox("RHO ρ")
+if Greeks_Rho : 
+    result_Rho = calculate_Rho(stock_price, strike_price, r_free, maturity, sigma,option_type)
+    st.write(f"Rho = {result_Rho:.4f}")
+    risk_free_rates = np.linspace(0.01, 0.2, 200)
+    rhos = [calculate_Rho(stock_price, strike_price, r_free, maturity, sigma, option_type) for r_free in risk_free_rates]
+    fig5, ax5 = plt.subplots(figsize=(8, 5))
+    ax5.plot(risk_free_rates, rhos, label="Rho", color='blue')
+    ax5.set_xlabel("Risk-Free Rate")
+    ax5.set_ylabel("Rho")
+    ax5.set_title("Rho vs. Risk-Free Rate")
+    ax5.legend()
+    ax5.grid()
+    st.pyplot(fig5)

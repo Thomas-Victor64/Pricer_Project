@@ -1,4 +1,4 @@
-Pricer_ProjectOption Pricer with Streamlit This project is an Option Pricer that allows you to calculate the price of an option based on different financial models. Originally developed with Tkinter, the pricer has now been migrated to Streamlit for a more modern and interactive web interface. The pricer now supports several option pricing models:
+This project is an Option Pricer that allows you to calculate the price of an option based on different financial models. Originally developed with Tkinter, the pricer has now been migrated to Streamlit for a more modern and interactive web interface. The pricer now supports several option pricing models:
 
 Black-Scholes: The classic model for pricing European options.
 
